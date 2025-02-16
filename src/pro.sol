@@ -2,83 +2,82 @@
 pragma solidity ^0.8.13;
 
 import {baseDeposit} from "./base.sol";
-import {IERC20} from "./IERC20.sol";
 
 contract proDeposit is baseDeposit {
     uint256 public constant ANNUAL_RATE = 500;
-    IERC20 public immutable token;
-    struct DepositInfo {
+    uint256 public constant PRECISION = 1e18;
+    
+    struct DepositRecord {
         uint256 amount;
         uint256 depositTime;
-        bool isToken;
+        uint256 lastInterestUpdate;
     }
     
-    mapping(address => DepositInfo) public userDeposits;
+    mapping(address => DepositRecord) public userDeposits;
 
-    constructor(address _token) baseDeposit() {
-        token = IERC20(_token);
+    constructor() baseDeposit() {}
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Only owner can call this function");
+        _;
     }
 
     function deposit() public payable override {
         require(msg.value > 0, "Deposit amount must be greater than 0");
         
+        // 先结算之前的利息
         if (userDeposits[msg.sender].amount > 0) {
             uint256 interest = calculateInterest(msg.sender);
             userDeposits[msg.sender].amount += interest;
+            userDeposits[msg.sender].lastInterestUpdate = block.timestamp;
+        } else {
+            // 新用户首次存款
+            userDeposits[msg.sender].depositTime = block.timestamp;
+            userDeposits[msg.sender].lastInterestUpdate = block.timestamp;
         }
         
         userDeposits[msg.sender].amount += msg.value;
-        userDeposits[msg.sender].depositTime = block.timestamp;
         emit Deposit(msg.sender, msg.value);
     }
 
-    function depositToken(uint256 amount) public {
-        require(amount > 0, "Deposit amount must be greater than 0");
-        require(token.transferFrom(msg.sender, address(this), amount), "Token transfer failed");
-        
-        if (userDeposits[msg.sender].amount > 0) {
-            uint256 interest = calculateInterest(msg.sender);
-            userDeposits[msg.sender].amount += interest;
-        }
-        
-        userDeposits[msg.sender].amount += amount;
-        userDeposits[msg.sender].depositTime = block.timestamp;
-        userDeposits[msg.sender].isToken = true;
-
-        emit Deposit(msg.sender, amount);
-    }
-
     function calculateInterest(address user) public view returns (uint256) {
-        DepositInfo memory userDeposit = userDeposits[user];
-        if (userDeposit.amount == 0) return 0;
+        DepositRecord memory record = userDeposits[user];
+        if (record.amount == 0) return 0;
 
-        uint256 timeElapsed = block.timestamp - userDeposit.depositTime;
+        uint256 timeElapsed = block.timestamp - record.lastInterestUpdate;
         
-        uint256 interest = (userDeposit.amount * ANNUAL_RATE * timeElapsed) / (10000 * 31536000);
-        
-        return interest;
+        // 使用更高精度的计算方式
+        uint256 interest = (record.amount * ANNUAL_RATE * timeElapsed * PRECISION) 
+            / (10000 * 31536000);
+        return interest / PRECISION;
     }
 
     function withdraw(uint256 needAmount) public override {
-      uint256 amount = userDeposits[msg.sender].amount;
-      require(amount > 0, "No deposit found");
+        DepositRecord storage record = userDeposits[msg.sender];
+        require(record.amount > 0, "No deposit found");
 
-      uint256 interest = calculateInterest(msg.sender);
-      uint256 totalAmount = amount + interest;
+        uint256 interest = calculateInterest(msg.sender);
+        uint256 totalAmount = record.amount + interest;
+        require(totalAmount >= needAmount, "Insufficient balance");
+        
+        // 更新余额和最后更新时间
+        record.amount = totalAmount - needAmount;
+        record.lastInterestUpdate = block.timestamp;
+        
+        // 如果全部提取，重置存款时间
+        if (record.amount == 0) {
+            record.depositTime = 0;
+            record.lastInterestUpdate = 0;
+        }
 
-      bool isToken = userDeposits[msg.sender].isToken;
-      if (isToken) {
-        require(totalAmount >= needAmount, "Insufficient contract balance");
-
-        userDeposits[msg.sender].amount = totalAmount - needAmount;
-        require(token.transfer(msg.sender, needAmount), "Token transfer failed");
-      }else{
-        require(totalAmount >= needAmount, "Insufficient contract balance");
-
-        userDeposits[msg.sender].amount = totalAmount - needAmount;
         (bool success, ) = payable(msg.sender).call{value: needAmount}("");
         require(success, "Transfer failed");
-      }
-      emit Withdraw(msg.sender, needAmount);
+        emit Withdraw(msg.sender, needAmount);
     }
+
+    function ownerDeposit() public payable onlyOwner {
+      require(msg.value > 0, "Deposit amount must be greater than 0");
+      emit Deposit(msg.sender, msg.value);
+    }
+
 }
